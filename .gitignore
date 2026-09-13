@@ -1,0 +1,32 @@
+# Environment & Secrets
+.env
+.env*.local
+*.pem
+*.key
+credentials.json
+
+# Dependencies & Environments
+node_modules/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build & Cache
+dist/
+build/
+.cache/
+.ruff_cache/
+.pytest_cache/
+
+# OS & Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local logs & test data
+*.log
+scratch/
+test_audio/
