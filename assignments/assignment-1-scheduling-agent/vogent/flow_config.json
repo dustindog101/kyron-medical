@@ -1,0 +1,122 @@
+{
+  "name": "Kyron Medical AI Scheduling Agent",
+  "version": "1.0.0",
+  "description": "Flow-based conversational voice agent for clinical appointment scheduling based on physician protocols.",
+  "telephony": {
+    "stt_engine": "whisper-streaming-en",
+    "tts_voice": "en-US-JennyMultilingualNeural",
+    "vad_silence_timeout_ms": 1200,
+    "barge_in_enabled": true
+  },
+  "nodes": [
+    {
+      "id": "node_greeting",
+      "type": "speak_and_listen",
+      "prompt": "Thank you for calling Kyron Medical Scheduling. Are you a new or returning patient?",
+      "transitions": [
+        { "condition": "intent == 'new_patient'", "target": "node_collect_new_patient" },
+        { "condition": "intent == 'returning_patient'", "target": "node_lookup_patient" },
+        { "condition": "default", "target": "node_triage_issue" }
+      ]
+    },
+    {
+      "id": "node_lookup_patient",
+      "type": "webhook",
+      "url": "/api/patients/lookup",
+      "method": "GET",
+      "parameters": {
+        "phone": "{{caller.phone}}"
+      },
+      "transitions": [
+        { "condition": "response.found == true", "target": "node_returning_welcome" },
+        { "condition": "default", "target": "node_collect_new_patient" }
+      ]
+    },
+    {
+      "id": "node_returning_welcome",
+      "type": "speak",
+      "prompt": "Welcome back, {{patient.name}}. What symptoms or injury are you looking to be seen for today?",
+      "next": "node_triage_issue"
+    },
+    {
+      "id": "node_collect_new_patient",
+      "type": "speak_and_listen",
+      "prompt": "Welcome! Could I get your first and last name?",
+      "extract": ["caller_name"],
+      "next": "node_triage_issue"
+    },
+    {
+      "id": "node_triage_issue",
+      "type": "speak_and_listen",
+      "prompt": "Could you describe what symptoms or injury you need to be seen for?",
+      "extract": ["body_part", "issue_type", "preferred_doctor"],
+      "next": "node_match_protocol"
+    },
+    {
+      "id": "node_match_protocol",
+      "type": "webhook",
+      "url": "/api/routing/match",
+      "method": "POST",
+      "body": {
+        "body_part": "{{extracted.body_part}}",
+        "issue_type": "{{extracted.issue_type}}",
+        "is_new_patient": "{{patient.is_new}}",
+        "preferred_doctor": "{{extracted.preferred_doctor}}"
+      },
+      "transitions": [
+        { "condition": "response.success == true", "target": "node_offer_slots" },
+        { "condition": "response.status_code == 'ALL_DOCTORS_CLOSED_NEW_PATIENTS'", "target": "node_transfer_intake" },
+        { "condition": "default", "target": "node_clarify_issue" }
+      ]
+    },
+    {
+      "id": "node_offer_slots",
+      "type": "speak_and_listen",
+      "prompt": "{{response.agent_speech}}",
+      "extract": ["selected_slot_time"],
+      "transitions": [
+        { "condition": "caller_accepts_slot", "target": "node_book_appointment" },
+        { "condition": "caller_rejects_slot", "target": "node_offer_fallback_slots" }
+      ]
+    },
+    {
+      "id": "node_book_appointment",
+      "type": "webhook",
+      "url": "/api/appointments/book",
+      "method": "POST",
+      "body": {
+        "patient_id": "{{patient.id}}",
+        "slot_id": "{{selected_slot.id}}",
+        "body_part": "{{extracted.body_part}}",
+        "issue_type": "{{extracted.issue_type}}"
+      },
+      "next": "node_confirmation"
+    },
+    {
+      "id": "node_confirmation",
+      "type": "speak",
+      "prompt": "{{response.confirmation_speech}}",
+      "next": "node_end_call"
+    },
+    {
+      "id": "node_transfer_intake",
+      "type": "speak_and_transfer",
+      "prompt": "{{response.agent_speech}}",
+      "transfer_number": "+18005551212",
+      "next": "node_end_call"
+    },
+    {
+      "id": "node_end_call",
+      "type": "webhook",
+      "url": "/api/calls/webhook",
+      "method": "POST",
+      "body": {
+        "call_sid": "{{call.sid}}",
+        "caller_phone": "{{caller.phone}}",
+        "status": "{{call.final_status}}",
+        "transcript": "{{call.full_transcript}}",
+        "duration_seconds": "{{call.duration}}"
+      }
+    }
+  ]
+}

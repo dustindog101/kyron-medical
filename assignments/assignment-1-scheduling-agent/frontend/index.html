@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kyron Medical | AI Voice Scheduling Call Review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Header / Navigation -->
+  <header class="top-nav">
+    <div class="nav-container">
+      <div class="brand">
+        <div class="brand-badge">KYRON</div>
+        <div class="brand-titles">
+          <h1>Voice Scheduling Agent</h1>
+          <span class="sub-title">Call Review & Clinical Triage Dashboard</span>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <span class="live-pill"><span class="pulse-dot"></span> Live Telephony</span>
+        <button id="btn-simulate" class="btn btn-primary">+ Simulate Test Call</button>
+        <button id="btn-refresh" class="btn btn-secondary">Refresh Calls</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-container">
+    <!-- Metrics Bar -->
+    <section class="metrics-grid">
+      <div class="metric-card">
+        <span class="metric-label">Total Calls</span>
+        <div class="metric-val" id="metric-total">0</div>
+        <span class="metric-sub">Ingested across all lines</span>
+      </div>
+      <div class="metric-card green">
+        <span class="metric-label">Scheduled</span>
+        <div class="metric-val" id="metric-scheduled">0</div>
+        <span class="metric-sub" id="metric-conversion">0% booking conversion</span>
+      </div>
+      <div class="metric-card purple">
+        <span class="metric-label">Redirected</span>
+        <div class="metric-val" id="metric-redirected">0</div>
+        <span class="metric-sub">Protocol & provider alternatives</span>
+      </div>
+      <div class="metric-card amber">
+        <span class="metric-label">Abandoned</span>
+        <div class="metric-val" id="metric-abandoned">0</div>
+        <span class="metric-sub">Caller hung up early</span>
+      </div>
+      <div class="metric-card rose">
+        <span class="metric-label">Failed / Triage</span>
+        <div class="metric-val" id="metric-failed">0</div>
+        <span class="metric-sub">Warm handoff to intake</span>
+      </div>
+    </section>
+
+    <!-- Filters & Calls Table -->
+    <section class="content-layout">
+      <!-- Left Column: Calls List -->
+      <div class="calls-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2>Call History</h2>
+            <span class="badge-count" id="calls-count">0 calls</span>
+          </div>
+          <div class="filter-group">
+            <button class="filter-tab active" data-status="ALL">All</button>
+            <button class="filter-tab" data-status="SCHEDULED">Scheduled</button>
+            <button class="filter-tab" data-status="REDIRECTED">Redirected</button>
+            <button class="filter-tab" data-status="ABANDONED">Abandoned</button>
+            <button class="filter-tab" data-status="FAILED">Failed</button>
+          </div>
+        </div>
+
+        <div class="calls-list-container" id="calls-list">
+          <div class="empty-state">Loading call records...</div>
+        </div>
+      </div>
+
+      <!-- Right Column: Detail Inspector -->
+      <div class="inspector-panel" id="inspector-panel">
+        <div class="inspector-empty" id="inspector-empty">
+          <div class="empty-icon">📞</div>
+          <h3>Select a call to review</h3>
+          <p>Click on any call entry on the left to inspect full audio transcript, patient details, and physician routing logs.</p>
+        </div>
+
+        <div class="inspector-content" id="inspector-content" style="display: none;">
+          <!-- Detail Header -->
+          <div class="detail-header">
+            <div>
+              <div class="detail-meta">
+                <span class="status-pill" id="detail-status">SCHEDULED</span>
+                <span class="detail-sid" id="detail-sid">VOG-1001</span>
+                <span class="detail-date" id="detail-date">Today at 2:30 PM</span>
+              </div>
+              <h2 id="detail-patient-name">Patient Name</h2>
+              <div class="detail-phone" id="detail-phone">+1 (555) 000-0000</div>
+            </div>
+            <div class="duration-badge" id="detail-duration">02:15</div>
+          </div>
+
+          <!-- Appointment Banner (if scheduled) -->
+          <div class="appointment-banner" id="appointment-banner" style="display: none;">
+            <div class="banner-title">
+              <span class="calendar-icon">📅</span>
+              <div>
+                <strong>Appointment Confirmed</strong>
+                <div class="banner-sub" id="banner-physician-location">Dr. Maria Chen • Main Campus</div>
+              </div>
+            </div>
+            <div class="banner-time" id="banner-time">Tuesday, Sept 15 at 10:00 AM</div>
+            <div class="banner-badges">
+              <span class="tag" id="banner-body-part">Knee</span>
+              <span class="tag" id="banner-issue-type">Sports Medicine</span>
+            </div>
+          </div>
+
+          <!-- Clinical Summary -->
+          <div class="detail-section">
+            <h4 class="section-heading">Clinical Summary</h4>
+            <div class="summary-box" id="detail-summary">Summary text here</div>
+          </div>
+
+          <!-- Transcript Viewer -->
+          <div class="detail-section transcript-section">
+            <div class="section-heading-row">
+              <h4 class="section-heading">Full Conversational Transcript</h4>
+              <button class="btn btn-sm" id="btn-copy-transcript">Copy Text</button>
+            </div>
+            <div class="transcript-stream" id="transcript-stream">
+              <!-- Messages injected by JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Call Simulation Modal -->
+  <div class="modal-backdrop" id="modal-backdrop" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Simulate Inbound Patient Call</h3>
+        <button class="btn-close" id="btn-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">Test the physician protocol routing rules and generate an instant live call review record.</p>
+
+        <form id="sim-form">
+          <div class="form-group">
+            <label>Patient Name</label>
+            <input type="text" id="sim-name" value="Marcus Wright" required />
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Caller Phone</label>
+              <input type="text" id="sim-phone" value="+1 (415) 555-8822" required />
+            </div>
+            <div class="form-group">
+              <label>Patient Status</label>
+              <select id="sim-patient-type">
+                <option value="new">New Patient</option>
+                <option value="returning">Returning Patient</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Body Part</label>
+              <select id="sim-body-part">
+                <option value="Knee">Knee</option>
+                <option value="Hip">Hip</option>
+                <option value="Shoulder">Shoulder</option>
+                <option value="Hand/Wrist">Hand/Wrist</option>
+                <option value="Foot/Ankle">Foot/Ankle</option>
+                <option value="Spine">Spine</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Issue Type</label>
+              <select id="sim-issue-type">
+                <option value="Sports Medicine">Sports Medicine</option>
+                <option value="Fracture">Fracture</option>
+                <option value="Joint Replacement">Joint Replacement</option>
+                <option value="General">General Consultation</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Requested Doctor (Optional - test redirections)</label>
+            <input type="text" id="sim-requested-doctor" placeholder="e.g. Dr. Aisha Patel, Dr. Maria Chen" />
+            <span class="help-text">Try requesting 'Dr. Aisha Patel' for a new patient to test the redirectional protocol!</span>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="btn-modal-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary" id="btn-modal-submit">Run Simulation</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
