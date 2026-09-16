@@ -1,8 +1,8 @@
 # Kyron Medical — Work Trial: AI Medical Scheduling Agent
 
-A production-grade, voice-driven clinical appointment scheduling platform designed to handle complex multi-physician protocols, intelligent patient routing, real-time slot selection, and call telemetry review.
+A voice-driven clinical appointment scheduling platform: a flow-based **Vogent voice agent** triages callers (new vs. returning, body part, issue type), a deterministic **physician-protocol routing engine** matches them to the right doctor and live slots, a **Flask REST API** backs every step of the call, and a **call-review dashboard** shows transcripts, booking status, and confirmed appointments.
 
-Backed by a **Python/Flask REST API**, a **deterministic protocol routing engine**, an interactive **Call Review Dashboard**, and a flow-based **Vogent Voice Agent specification**.
+Live deployment: `https://54-90-91-169.sslip.io` (dashboard + API) on AWS EC2 via Docker. Inbound test line: **+1 (301) 560-1855** (Vogent number linked to the Medical Scheduler Agent, v5.6 flow).
 
 ---
 
@@ -12,8 +12,8 @@ Backed by a **Python/Flask REST API**, a **deterministic protocol routing engine
 ```bash
 docker compose up -d --build
 ```
-* Access the **Call Review Dashboard**: [http://localhost:5000](http://localhost:5000)
-* API Health Endpoint: [http://localhost:5000/health](http://localhost:5000/health)
+* **Call Review Dashboard**: [http://localhost:5000](http://localhost:5000)
+* API Health: [http://localhost:5000/health](http://localhost:5000/health)
 * Protocol Summary: [http://localhost:5000/api/protocols/summary](http://localhost:5000/api/protocols/summary)
 
 ### Option 2: Local Python Environment
@@ -22,7 +22,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python app/seed.py    # Seeds 12 doctors, protocols, and 980 slots
+python app/seed.py    # Seeds 12 doctors, protocols, and ~980 slots
 python wsgi.py        # Starts Flask server on port 5050
 ```
 
@@ -31,68 +31,86 @@ python wsgi.py        # Starts Flask server on port 5050
 cd backend
 PYTHONPATH=. pytest -v
 ```
-*All 15 test suites verify clinical routing edge cases, new vs. returning patients, doctor redirections, and double-booking protections.*
+21 tests covering clinical routing edge cases, new vs. returning patients, doctor redirections, double-booking protection (asserting the speakable-failure contract), missing-input and template-literal rejection, Vogent payload shapes (nested `params`, string booleans/ids, list transcripts), second-slot time matching, and follow-up normalization.
 
 ---
 
 ## 🏗️ What Was Built
 
 ### 1. Physician Protocol Routing Engine (`backend/app/protocols.py`)
-* **Deterministic Clinical Rules:** Faithfully encodes all rules across 12 physicians, 3 locations (`MAIN`, `NORTH`, `WEST`), and 4 issue categories (`Fracture`, `Joint Replacement`, `Sports Medicine`, `General`).
-* **Intelligent Redirection & Plain-English Explanations:**
-  * When a caller requests a physician who does not treat their issue (e.g. asking for Dr. David Nguyen for a hand fracture), the agent explicitly explains that Dr. Nguyen only sees general hand issues, and seamlessly redirects to Dr. Robert Kim.
-  * When a new patient requests a physician whose panel is closed to new patients (e.g. Dr. Aisha Patel, Dr. Sarah O'Brien, Dr. Thomas Reed), the engine explains that the doctor only takes follow-ups, and redirects to an open specialist with identical coverage.
-* **Resilient Clinical Fallback:** If a top-choice physician has no open slots, the engine automatically falls back to secondary physicians with overlapping clinical coverage (e.g., Knee: Chen $\rightarrow$ Vasquez $\rightarrow$ Walsh) without breaking conversation flow.
-* **Conversational Natural Language Generation:** Directly crafts natural, empathetic agent speech strings returned to Vogent for sub-second TTS synthesis.
+Deterministic rules over 12 physicians, 3 locations (`MAIN`, `NORTH`, `WEST`), and 4 issue types (`Fracture`, `Joint Replacement`, `Sports Medicine`, `General`):
+* **Per-doctor, per-body-part matching** — a doctor is matched only for the exact (body part, issue type) pairs in their protocol, never just "treats knees."
+* **`General` is general-only** — fracture/joint-replacement/sports callers are never routed to a `General` entry for that body part.
+* **New-patient panels** — closed-panel doctors (Patel, O'Brien, Reed) explain themselves in plain language and redirect to an open peer (e.g. new Hip Joint Replacement asking for Patel → Chen).
+* **Slot-aware fallback** — if the top match has no open slots, the engine falls through overlapping doctors (e.g. Knee: Chen → Vasquez → Walsh) without breaking the call.
+* **Synonym-tolerant normalization** — "follow-up" → General, "sprain/ACL" → Sports Medicine, "broken" → Fracture, "back/neck" → Spine — so freeform voice answers resolve to canonical protocol terms.
+* Every match returns `agent_speech` the voice agent speaks **verbatim**, so redirect explanations stay empathetic and consistent.
 
 ### 2. Flask REST Backend (`backend/app/api/`)
-* `GET /api/patients/lookup` — Distinguishes between new and returning callers based on phone or name/DOB, retrieving prior clinical visits.
-* `POST /api/routing/match` — The primary webhook called during conversation to match complaints to physicians and fetch live slots.
-* `GET /api/slots` — Dynamic slot lookup with doctor, location, and date filtering.
-* `POST /api/appointments/book` — Transactional booking engine with concurrency guards against double-booking.
-* `POST /api/calls/webhook` — Telemetry ingestion endpoint for Vogent call recordings, transcripts, and statuses.
-* `GET /api/calls` & `GET /api/calls/<id>` — Review API powering the frontend inspector.
-* `POST /api/calls/simulate` — Real-time simulation tool allowing reviewers to trigger complete end-to-end voice appointment flows directly from the UI.
+All Vogent API functions are POST-only and send `{"params": {...}}` wrappers with string-typed values — every endpoint unwraps and coerces defensively:
 
-### 3. Call Review Dashboard (`frontend/`)
-* **Live Telemetry & Metrics:** Real-time counters for Total Calls, Scheduled, Redirected, Abandoned, and Failed rates, with booking conversion metrics.
-* **Conversational Transcript Inspector:** Visualizes phone conversations in speaker bubbles (Agent vs. Caller) alongside duration, phone numbers, and timestamps.
-* **Confirmed Booking Banners:** Displays linked appointment records, physician names, locations, and appointment times for scheduled calls.
-* **Interactive Call Simulator:** Allows reviewers to test any clinical scenario with a click (e.g. testing new patient hip joint replacement requesting Dr. Patel).
+| Endpoint | Purpose |
+| :--- | :--- |
+| `POST /api/patients/lookup` | Phone-first lookup (placeholder numbers ignored), name/`ilike` fallback, DOB tiebreak. Returns `found`, `is_new_patient`, chart, prior visits. |
+| `POST /api/patients` | Duplicate-safe creation (placeholder numbers dedupe by name). Returns existing record with `duplicate: true`. |
+| `POST /api/routing/match` | Protocol match + live slots + verbatim speech. Cleans `"No."`/`"null"`/template placeholders; infers location/doctor mentions from freeform text. |
+| `GET/POST /api/slots` | Open-slot listing by doctor/location. |
+| `POST /api/appointments/book` | Re-runs the routing engine when no usable `slot_id` arrives, matches the caller's quoted time ("Thursday at 11" books the 11, not the 10), guards double-booking. Missing inputs, unknown charts, taken slots, and empty schedules all return **HTTP 200 with `success:false` plus speakable `agent_speech`/`confirmation_speech`** — never an HTTP error (an error page is what the voice agent hallucinated fake confirmations over). Links the booking to the dial's call log; **never fabricates transcripts**. |
+| `POST /api/calls/webhook` | End-of-call telemetry. Accepts string **or list** transcripts, drops unresolved `{{...}}` templates instead of crashing, resolves placeholder phones from the chart, defaults unknown outcomes to `FAILED`. |
+| `GET /api/calls`, `GET /api/calls/<id>` | Dashboard review API with status metrics. |
+| `POST /api/calls/sync` | Reconciles Vogent dial history (GraphQL) into the dashboard. Flow-reported outcomes are authoritative — sync never overwrites them. **Clinical labels are never defaulted**: body part / issue type come from dial answers, else are inferred from the caller's own transcript lines (agent greetings excluded — "Welcome *back*" is not a spine injury), else stay `NULL`. |
+| `POST /api/calls/simulate` | One-click end-to-end scenario runner (name, phone, status, body part, issue type, doctor, location). |
 
-### 4. Vogent Conversational Flow (`vogent/`)
-* `flow_config.json` — Declarative conversational state machine export with speech prompts, extraction entities, and conditional transitions.
-* `webhook_contract.md` — Complete HTTP contracts and schemas for every node.
-* `conversational_flow_guide.md` — Clinical telephone design principles (low cognitive load, two-slot offering rule, barge-in support).
+### 3. Call Review Dashboard (`frontend/`, zero-dependency vanilla JS served by Flask)
+Live counters (Total / Scheduled / Redirected / Abandoned / Failed + conversion), filterable call history, per-call inspector with speaker-bubble transcripts, confirmed-appointment banner, clinical summary, and a transcript-source badge that states each outcome's provenance (flow-reported vs. synced-inferred vs. simulated). Auto-refresh preserves the reviewer's current selection; the simulator covers location as well as doctor requests.
+
+### 4. Vogent Conversational Flow (v5.6, live default)
+`work-trial/deploy_vogent_flow_v12.py` deploys **"Kyron Clinical Scheduling Flow v5.6 (Speaking Identity & Confirmation)"** — 26 nodes, 7 linked functions, `INBOUND_OUTBOUND` opening so dashboard phone tests greet the same as inbound callers. Beyond the happy path it contains: a decline-first slot gate with an accept-language safety net and an echo-confirm recovery node; a clarified-issue recovery loop with a human-escape to the coordinator; explicit handling for every routing status code; string (`new`/`returning`) identity gates instead of boolean comparisons; network caller ID instead of transcribed phone numbers; spoken filler during booking; confirmations as question nodes (templates inside freeform prompts arrived unresolved and spoke nothing on three live dials); and booking/telemetry inputs restricted to variable shapes proven to resolve on real dials.
 
 ---
+
+## 🔬 Debugged Against Real Dials (what broke, why, what changed)
+
+Two live dials were traced end-to-end via `GET /dials/{id}` node transitions (plus a second round after v5.0):
+
+| Dial | Symptom | Root cause | Fix |
+| :--- | :--- | :--- | :--- |
+| John Black (Knee, accepted "Thursday, 10 AM") | Routed to decline node; agent hallucinated "…is now booked"; nothing booked; dashboard said REDIRECTED | Slot-choice classifier missed the time-repeat reply; `{{…available_slots.0.id}}` array syntax arrived as a literal (booking 500s); sync's "intake coordinator" substring heuristic overwrote the flow's ABANDONED | Decline-first + accept-language + echo-confirm gates; backend time-matches quoted replies; sync no longer overwrites flow outcomes |
+| Alice Johnson (returning, "Spine follow-up, Dr. Patel") | `found:true` lookup routed to new-patient path; double chart speech; hung up during re-interrogation | Boolean gate failed on two separate dials — replaced with a `patient_status` string gate (`returning`/`new` returned explicitly by the API); globals ride the string since boolean interpolation also arrived unresolved; follow-up → General |
+| v5.0 test calls (Emmanuel, Alice) | "10:00 AM" spoken as "one thousand"; agent never hung up (every dial ended in user hangup); same time offered twice; doctor named mid-triage ignored | TTS reads `:00` literally; Vogent leaves terminal function nodes open; parallel location slots shared timestamps; doctor inference scanned only the preferences field | Spoken times ("10 AM") everywhere voiced; backend hangs up non-transfer dials after telemetry; distinct-time offers with location qualifiers; word-boundary doctor scan over all freeform answers |
+| v5.3 live test (your call) | Booking succeeded but confirmation never spoke; caller hung up in dead air; caller-ID resolver stored our own Vogent number on charts; a platform event flipped the booking to FAILED | No filler speech during the multi-second booking call; `fromPhoneNumber` is always the workspace number (never the caller); dial lifecycle status ("completed") overwrote the call outcome | "Booking that for you now" filler; CLI excludes own workspace numbers; platform events acknowledged without touching rows; booked rows structurally pinned to SCHEDULED |
+
+---
+
+## 🎯 Key Decisions & Tradeoffs
+
+1. **Backend is the source of truth, the flow is a thin client.** Vogent documents only `{{node.id.field}}` references — array indexing doesn't resolve — so the flow passes raw caller answers and the booking endpoint re-runs the identical deterministic engine. Cost: one extra routing query per booking; benefit: offered and booked slots can never disagree.
+2. **Flow-reported outcomes win over inferred ones.** Transcript-substring status guessing once flipped a real ABANDONED to REDIRECTED; sync now only fills gaps.
+3. **Booking owns appointments, telemetry owns transcripts.** An earlier version had booking fabricate a "realistic" transcript that overwrote actual conversations — removed; it only links `appointment_id`.
+4. **Honest unknowns.** Unresolvable outcomes default to `FAILED` (not SCHEDULED) so conversion metrics are never inflated; unresolved templates are dropped, never persisted. The old sync defaults of `"Knee"` / `"Sports Medicine"` were removed entirely — unknown clinical labels stay `NULL` (or the literal `"Unknown"` on NOT NULL booking columns) rather than inventing a diagnosis on a caller's chart. Related: chart creation without a name is a `400`, and booking to an unresolvable chart fails loudly with spoken recovery instead of silently attaching to the most recent patient.
+5. **Placeholder telephony identity.** The flow has no reliable caller-CLI variable, so new charts carry `+15550100000` and dedupe by name. Caller identity is therefore chart-identity, not line-identity — acceptable for the trial, flagged below as follow-up work.
+6. **Network caller ID over transcription (v5.2).** Every function call carries a `dial_id` wrapper, so the backend exchanges it for the real caller CLI via Vogent's dial query (cached per dial, 2.5s cap, silent fallback) instead of trusting transcribed "phone numbers". Lookup tries CLI first, spoken name second; new charts store the real CLI so repeat callers are recognized with no questions. Identity confirmation ("Is this X?") stays, because shared phones exist.
+6. **Single-question slot echo-confirm instead of NLU over labels.** Mapping "Thursday, 10 AM" onto internal `first_option` labels is the observed failure mode; a direct yes/no echo plus backend time-matching is boring and reliable.
+7. **Known risks left visible:** the Vogent API key ships as a code fallback (`calls.py`) instead of a managed secret; diagnostics use `print` rather than structured logging; webhook duration defaults to 90s until dial sync replaces it with the real value. All three are in the roadmap, none affect call behavior.
 
 ## 🎯 What Was Deliberately Skipped & Why
 
-Under the 2-day work trial time constraint, we prioritized **bulletproof protocol correctness, clean architecture, and reviewer testability** over raw vanity features:
+1. **Reschedule / cancellation endpoints** — ~90% of inbound volume is first-time triage + booking; the `Appointment`↔`Slot` unique constraint and lookup models make these a small additive change, so protocol correctness came first.
+2. **Framework frontend (React/Next.js)** — a zero-dependency dashboard keeps single-container EC2 deployment failure-proof; no build step, no 300MB `node_modules`.
+3. **SMS/Twilio confirmations** — confirmations are structured API data (`confirmation_speech` + dashboard banner) rather than live carrier calls; binding real credentials is deployment config, not trial signal.
+4. **AuthN/Z on the API** — the trial backend is a private demo host behind an unlisted domain; per-clinic auth (and the secret-manager fix above) belongs with real PHI, which this demo dataset does not contain.
 
-1. **Complex Multi-Step Rescheduling / Cancellation:**
-   * *Why skipped:* 90% of inbound scheduling volume is initial triage and booking. We implemented full appointment lookup and model relationships so cancellation can be added in an hour, but prioritized getting the complex physician protocol matching and fallback logic 100% correct first.
-2. **Heavyweight Frontend Framework (Next.js/React):**
-   * *Why skipped:* Rather than introducing a 300MB `node_modules` footprint and complex build steps on EC2, we built a zero-dependency, ultra-fast vanilla JS/CSS dashboard directly served by Flask. This ensures single-container deployment with zero build failures.
-3. **SMS / Twilio Outbound Gateway Integration:**
-   * *Why skipped:* Confirmation messages and reminders are simulated via structured API logs rather than binding to live carrier credentials.
+## 🚀 What We'd Do Next With More Time
 
----
+1. Managed secrets + request signing for Vogent webhooks; structured JSON logging with dial-id correlation.
+2. Real caller-CLI passthrough (Vogent telephony variable) to replace placeholder-number identity.
+3. Reschedule/cancel voice paths reusing the existing slot engine.
+4. Physician vacation/shift overrides UI (block surgery days without code changes).
+5. Insurance eligibility (270/271) pre-check inside `routing/match`.
+6. EHR adapters (Epic on FHIR, AthenaHealth) behind the current `Slot`/`Appointment` boundary.
 
-## 🚀 What We'd Build Next With More Time
+## 📹 Video Walkthrough
+*Link to Loom / Drive walkthrough to be added — the dashboard's Simulate button reproduces every scenario in the demo live.*
 
-1. **Direct EHR Adapter Layer:** Plug adapters for AthenaHealth, Epic on FHIR, and eClinicalWorks into the `Slot` and `Appointment` services.
-2. **Predictive Waitlist & Auto-Fill:** If a popular physician (e.g., Dr. Chen) has a cancellation, an automated outbound voice agent calls waitlisted patients to claim the open slot.
-3. **Insurance Eligibility Checking (270/271 Real-Time Transaction):** Verify patient co-pay, deductible, and active insurance coverage during the call before finalizing the slot.
-4. **Physician Vacation / Shift Overrides:** A lightweight admin interface for clinic practice managers to block out surgery days without touching protocol files.
-
----
-
-## 📹 Video Walkthrough & Code Structure Overview
-* *[Link to Loom / Drive Video Walkthrough]*
-* Code structure follows clean separation of concerns:
-  * `backend/app/models.py` $\rightarrow$ Relational database schemas
-  * `backend/app/protocols.py` $\rightarrow$ Pure clinical routing business logic
-  * `backend/app/api/` $\rightarrow$ Decoupled HTTP transport layer
-  * `backend/tests/` $\rightarrow$ Deterministic pytest suite
+## 🗂️ Code Map
+* `backend/app/models.py` → relational schemas · `backend/app/protocols.py` → pure routing logic + TTS-safe speech formatting · `backend/app/api/` → HTTP transport · `backend/tests/` → pytest suite (32 tests) · `frontend/` → dashboard · `vogent/` → flow blueprint + contracts · `work-trial/deploy_vogent_flow_v12.py` → live v5.6 flow deployer

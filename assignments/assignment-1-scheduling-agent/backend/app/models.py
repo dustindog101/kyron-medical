@@ -84,6 +84,7 @@ class Slot(Base):
     appointment = relationship("Appointment", uselist=False, back_populates="slot")
 
     def to_dict(self):
+        from app.protocols import speak_time
         return {
             "id": self.id,
             "doctor_id": self.doctor_id,
@@ -93,6 +94,7 @@ class Slot(Base):
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "formatted_time": self.start_time.strftime("%A, %B %d at %I:%M %p"),
+            "spoken_time": f"{self.start_time.strftime('%A')} at {speak_time(self.start_time)}",
             "is_booked": self.is_booked,
         }
 
@@ -175,10 +177,23 @@ class CallLog(Base):
     duration_seconds = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
+    transcript_source = Column(String(50), nullable=True, default="Vogent Telephony Webhook")
     patient = relationship("Patient", back_populates="call_logs")
     appointment = relationship("Appointment", back_populates="call_log")
 
     def to_dict(self):
+        source = getattr(self, "transcript_source", None)
+        if not source:
+            sid = str(self.call_sid or "")
+            if "-" in sid and len(sid) == 36 and not sid.startswith("SIM-"):
+                source = "Vogent Telephony Audio Sync"
+            elif sid.startswith("SIM-"):
+                source = "Direct Simulation"
+            elif sid.startswith("VOG-"):
+                source = "Vogent Telephony Webhook"
+            else:
+                source = "Telephony Webhook"
+
         return {
             "id": self.id,
             "call_sid": self.call_sid,
@@ -189,6 +204,7 @@ class CallLog(Base):
             "appointment": self.appointment.to_dict() if self.appointment else None,
             "status": self.status,
             "transcript": self.transcript,
+            "transcript_source": source,
             "summary": self.summary,
             "detected_body_part": self.detected_body_part,
             "detected_issue_type": self.detected_issue_type,

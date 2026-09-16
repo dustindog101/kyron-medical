@@ -1,7 +1,12 @@
 {
   "name": "Kyron Medical AI Scheduling Agent",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Flow-based conversational voice agent for clinical appointment scheduling based on physician protocols.",
+  "_note": "SUBMISSION BLUEPRINT, not a Vogent import file: Vogent's Flow Builder has no JSON import (nodes are built in the UI as question / freeform / function-call nodes with Order+Variable+Condition-Type edges). Rebuild each node below in the UI using its vogent_ui hint. Set backend_base_url to the public HTTPS backend (ngrok for testing, EC2 domain for submission) in every webhook/function URL.",
+  "variables": {
+    "backend_base_url": "https://54-90-91-169.sslip.io",
+    "intake_transfer_number": "+13017282146"
+  },
   "telephony": {
     "stt_engine": "whisper-streaming-en",
     "tts_voice": "en-US-JennyMultilingualNeural",
@@ -12,6 +17,7 @@
     {
       "id": "node_greeting",
       "type": "speak_and_listen",
+      "vogent_ui": { "node_type": "question", "answer_type": "Multiple Choice", "choices": ["new_patient", "returning_patient"], "note": "Set flow variable patient.is_new = true on the new branch, false on the returning branch. booking and match read it." },
       "prompt": "Thank you for calling Kyron Medical Scheduling. Are you a new or returning patient?",
       "transitions": [
         { "condition": "intent == 'new_patient'", "target": "node_collect_new_patient" },
@@ -22,8 +28,9 @@
     {
       "id": "node_lookup_patient",
       "type": "webhook",
-      "url": "/api/patients/lookup",
-      "method": "GET",
+      "vogent_ui": { "node_type": "function", "function": "patient_lookup", "note": "Vogent API functions are POST-only. Caller phone comes from dial metadata." },
+      "url": "{{backend_base_url}}/api/patients/lookup",
+      "method": "POST",
       "parameters": {
         "phone": "{{caller.phone}}"
       },
@@ -35,43 +42,71 @@
     {
       "id": "node_returning_welcome",
       "type": "speak",
+      "vogent_ui": { "node_type": "freeform", "note": "Greeting only, always continues to triage. Reference patient_lookup.patient.name via @." },
       "prompt": "Welcome back, {{patient.name}}. What symptoms or injury are you looking to be seen for today?",
       "next": "node_triage_issue"
     },
     {
       "id": "node_collect_new_patient",
       "type": "speak_and_listen",
+      "vogent_ui": { "node_type": "question", "answer_type": "Freeform", "note": "Capture full name, then MUST go through node_create_patient so booking has a patient_id. Caller phone comes from dial metadata." },
       "prompt": "Welcome! Could I get your first and last name?",
       "extract": ["caller_name"],
+      "next": "node_create_patient"
+    },
+    {
+      "id": "node_create_patient",
+      "type": "webhook",
+      "vogent_ui": { "node_type": "function", "function": "create_patient", "note": "Creates the record (duplicate-safe: returns the existing record if the phone is known). response.patient.id feeds node_book_appointment." },
+      "url": "{{backend_base_url}}/api/patients",
+      "method": "POST",
+      "body": {
+        "name": "{{extracted.caller_name}}",
+        "phone": "{{caller.phone}}",
+        "is_new_patient": true
+      },
       "next": "node_triage_issue"
     },
     {
       "id": "node_triage_issue",
       "type": "speak_and_listen",
-      "prompt": "Could you describe what symptoms or injury you need to be seen for?",
-      "extract": ["body_part", "issue_type", "preferred_doctor"],
+      "vogent_ui": { "node_type": "question", "answer_type": "Freeform", "note": "Extract all four slots from one natural answer; do not interrogate field by field." },
+      "prompt": "Could you describe what symptoms or injury you need to be seen for? And which location works best — Main Campus, North Clinic, or Westside?",
+      "extract": ["body_part", "issue_type", "preferred_doctor", "preferred_location"],
       "next": "node_match_protocol"
     },
     {
       "id": "node_match_protocol",
       "type": "webhook",
-      "url": "/api/routing/match",
+      "vogent_ui": { "node_type": "function", "function": "routing_match", "note": "Core protocol router. agent_speech in the response already contains plain-language redirect explanations and the two slot offers — speak it verbatim." },
+      "url": "{{backend_base_url}}/api/routing/match",
       "method": "POST",
       "body": {
         "body_part": "{{extracted.body_part}}",
         "issue_type": "{{extracted.issue_type}}",
         "is_new_patient": "{{patient.is_new}}",
-        "preferred_doctor": "{{extracted.preferred_doctor}}"
+        "preferred_doctor": "{{extracted.preferred_doctor}}",
+        "preferred_location": "{{extracted.preferred_location}}"
       },
       "transitions": [
         { "condition": "response.success == true", "target": "node_offer_slots" },
         { "condition": "response.status_code == 'ALL_DOCTORS_CLOSED_NEW_PATIENTS'", "target": "node_transfer_intake" },
+        { "condition": "response.status_code == 'NO_SLOTS_AVAILABLE'", "target": "node_transfer_intake" },
         { "condition": "default", "target": "node_clarify_issue" }
       ]
     },
     {
+      "id": "node_clarify_issue",
+      "type": "speak_and_listen",
+      "vogent_ui": { "node_type": "question", "answer_type": "Multiple Choice", "choices": ["Fracture", "Sports Medicine", "Joint Replacement", "General"], "note": "Recovery path for unclear complaints. Loops back to match once body_part + issue_type are known." },
+      "prompt": "Just to make sure I route you correctly — is this for a recent fracture, a sports injury, a joint replacement evaluation, or a general consultation? And which body part is it for?",
+      "extract": ["body_part", "issue_type"],
+      "next": "node_match_protocol"
+    },
+    {
       "id": "node_offer_slots",
       "type": "speak_and_listen",
+      "vogent_ui": { "node_type": "question", "answer_type": "Multiple Choice", "choices": ["accepts_slot", "rejects_slot"], "note": "Speak response.agent_speech verbatim (two time options max). Map the accepted time back to available_slots[].id for booking." },
       "prompt": "{{response.agent_speech}}",
       "extract": ["selected_slot_time"],
       "transitions": [
@@ -80,9 +115,21 @@
       ]
     },
     {
+      "id": "node_offer_fallback_slots",
+      "type": "speak_and_listen",
+      "vogent_ui": { "node_type": "question", "answer_type": "Multiple Choice", "choices": ["accepts_slot", "rejects_slot"], "note": "Backend already fell back to the next overlapping doctor; this node only handles the caller's yes/no." },
+      "prompt": "No problem. I can check the next available doctor who treats the same issue — would you like me to do that?",
+      "extract": ["selected_slot_time"],
+      "transitions": [
+        { "condition": "caller_accepts_slot", "target": "node_book_appointment" },
+        { "condition": "default", "target": "node_transfer_intake" }
+      ]
+    },
+    {
       "id": "node_book_appointment",
       "type": "webhook",
-      "url": "/api/appointments/book",
+      "vogent_ui": { "node_type": "function", "function": "book_appointment", "note": "Only fires after explicit caller yes. Failures (double-booking, no slots, missing inputs) return HTTP 200 with success:false plus speakable agent_speech/confirmation_speech — never an HTTP error, so the agent can voice the recovery instead of hallucinating." },
+      "url": "{{backend_base_url}}/api/appointments/book",
       "method": "POST",
       "body": {
         "patient_id": "{{patient.id}}",
@@ -95,27 +142,34 @@
     {
       "id": "node_confirmation",
       "type": "speak",
+      "vogent_ui": { "node_type": "freeform", "note": "Terminal confirmation. Speak response.confirmation_speech verbatim (doctor, time, location). Set call.outcome_status = SCHEDULED and appointment.id from the booking response, then end." },
       "prompt": "{{response.confirmation_speech}}",
       "next": "node_end_call"
     },
     {
       "id": "node_transfer_intake",
       "type": "speak_and_transfer",
+      "vogent_ui": { "node_type": "function", "function": "transfer_to_intake", "note": "Warm handoff. Set call.outcome_status = REDIRECTED before transfer. Replace transfer_number with the real intake line before demoing." },
       "prompt": "{{response.agent_speech}}",
-      "transfer_number": "+18005551212",
+      "transfer_number": "+13017282146",
       "next": "node_end_call"
     },
     {
       "id": "node_end_call",
       "type": "webhook",
-      "url": "/api/calls/webhook",
+      "vogent_ui": { "node_type": "function", "function": "log_call", "note": "Telemetry only — runs after hangup so the caller never waits on it. STATUS IS AN ENUM, not Vogent's internal status: set call.outcome_status = SCHEDULED on the confirmation path, REDIRECTED on the transfer path, ABANDONED if the caller hung up mid-flow, FAILED otherwise. Backend coerces anything else to FAILED." },
+      "url": "{{backend_base_url}}/api/calls/webhook",
       "method": "POST",
       "body": {
         "call_sid": "{{call.sid}}",
         "caller_phone": "{{caller.phone}}",
-        "status": "{{call.final_status}}",
+        "status": "{{call.outcome_status}}",
         "transcript": "{{call.full_transcript}}",
-        "duration_seconds": "{{call.duration}}"
+        "duration_seconds": "{{call.duration}}",
+        "patient_id": "{{patient.id}}",
+        "appointment_id": "{{appointment.id}}",
+        "detected_body_part": "{{extracted.body_part}}",
+        "detected_issue_type": "{{extracted.issue_type}}"
       }
     }
   ]

@@ -2,13 +2,15 @@
 
 This document outlines the API endpoints that the **Vogent** flow-based voice agent calls during a phone conversation.
 
-Base URL in Production: `http://<EC2-IP>:5000` (or `https://<DOMAIN>`)
+Base URL in Production: `https://54-90-91-169.sslip.io`
+
+All endpoints accept POST (Vogent API functions are POST-only).
 
 ---
 
 ## 1. Patient Lookup & Triage
 
-* **Endpoint:** `GET /api/patients/lookup`
+* **Endpoint:** `POST /api/patients/lookup` (GET with query params also works for browser testing)
 * **Purpose:** Determine if caller is an existing patient or new patient.
 * **When called:** After greeting, when caller provides their phone number or full name.
 

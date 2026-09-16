@@ -8,6 +8,7 @@ Dedicated workspace for engineering assignments, client customization requests, 
 
 ```text
 kyron-medical/
+├── work-trial/       # Work trial assignment prompts, source PDFs, protocols & index
 ├── assignments/      # Milestone tasks, onboarding assignments, test suites
 ├── integrations/     # Custom EHR adapters, clinic workflows, webhook handlers
 ├── src/              # Core business logic, voice pipeline utilities, tool calling

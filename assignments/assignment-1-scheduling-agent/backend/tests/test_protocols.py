@@ -118,3 +118,33 @@ def test_fallback_when_top_doctor_has_no_slots(db_session):
     )
     assert res.success is True
     assert len(res.available_slots) > 0
+
+def test_no_slots_returns_graceful_failure_not_crash(db_session):
+    """Regression: NO_SLOTS_AVAILABLE must return a result, not raise TypeError."""
+    from app.models import Slot, DoctorProtocol
+    protos = db_session.query(DoctorProtocol).filter(
+        DoctorProtocol.body_part == "Foot/Ankle",
+        DoctorProtocol.accepted_type == "Joint Replacement",
+    ).all()
+    ids = [p.doctor_id for p in protos]
+    assert len(ids) > 0
+    db_session.query(Slot).filter(Slot.doctor_id.in_(ids)).update(
+        {Slot.is_booked: True}, synchronize_session=False
+    )
+    db_session.commit()
+    try:
+        res = route_patient(
+            db=db_session,
+            body_part_raw="Foot/Ankle",
+            issue_type_raw="Joint Replacement",
+            is_new_patient=True,
+        )
+        assert res.success is False
+        assert res.status_code == "NO_SLOTS_AVAILABLE"
+        assert res.matched_doctor is not None
+        res.to_dict()
+    finally:
+        db_session.query(Slot).filter(Slot.doctor_id.in_(ids)).update(
+            {Slot.is_booked: False}, synchronize_session=False
+        )
+        db_session.commit()

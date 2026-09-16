@@ -1,12 +1,12 @@
 // Kyron Medical Voice Scheduling Agent - Call Review Dashboard Client
 
-const API_BASE = window.location.origin.includes(':5000') || window.location.origin.includes(':3000')
-  ? '' 
-  : 'http://localhost:5000';
+// Use relative origin if loaded via http/https; fallback to localhost if file://
+const API_BASE = window.location.protocol.startsWith('http') ? '' : 'http://localhost:5000';
 
 let allCalls = [];
 let currentFilter = 'ALL';
 let activeCallId = null;
+let pollTimer = null;
 
 // DOM Elements
 const callsListEl = document.getElementById('calls-list');
@@ -24,6 +24,8 @@ const metricConversionEl = document.getElementById('metric-conversion');
 
 // Inspector Details Elements
 const detailStatusEl = document.getElementById('detail-status');
+const detailSourceBadgeEl = document.getElementById('detail-source-badge');
+const transcriptSourceBadgeEl = document.getElementById('transcript-source-badge');
 const detailSidEl = document.getElementById('detail-sid');
 const detailDateEl = document.getElementById('detail-date');
 const detailPatientNameEl = document.getElementById('detail-patient-name');
@@ -50,10 +52,19 @@ const btnRefresh = document.getElementById('btn-refresh');
 document.addEventListener('DOMContentLoaded', () => {
   fetchCalls();
   setupEventListeners();
+  // Auto-refresh calls every 3 seconds so incoming test calls appear in real time
+  pollTimer = setInterval(fetchCalls, 3000);
 });
 
 function setupEventListeners() {
-  btnRefresh.addEventListener('click', () => fetchCalls());
+  btnRefresh.addEventListener('click', async () => {
+    btnRefresh.textContent = 'Syncing...';
+    try {
+      await fetch(`${API_BASE}/api/calls/sync`, { method: 'POST' });
+    } catch (e) {}
+    await fetchCalls();
+    btnRefresh.textContent = 'Refresh';
+  });
 
   // Filter tabs
   document.querySelectorAll('.filter-tab').forEach((tab) => {
@@ -86,6 +97,7 @@ function setupEventListeners() {
       body_part: document.getElementById('sim-body-part').value,
       issue_type: document.getElementById('sim-issue-type').value,
       preferred_doctor: document.getElementById('sim-requested-doctor').value || null,
+      preferred_location: document.getElementById('sim-location').value || null,
     };
 
     const submitBtn = document.getElementById('btn-modal-submit');
@@ -118,18 +130,37 @@ function setupEventListeners() {
     }
   });
 
-  // Copy transcript
+  // Copy transcript (with fallback for non-secure http contexts)
   btnCopyTranscript.addEventListener('click', () => {
     const activeCall = allCalls.find((c) => c.id === activeCallId);
     if (activeCall && activeCall.transcript) {
-      navigator.clipboard.writeText(activeCall.transcript).then(() => {
+      const done = () => {
         btnCopyTranscript.textContent = 'Copied!';
         setTimeout(() => {
           btnCopyTranscript.textContent = 'Copy Text';
         }, 1800);
-      });
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(activeCall.transcript).then(done).catch(() => fallbackCopy(activeCall.transcript, done));
+      } else {
+        fallbackCopy(activeCall.transcript, done);
+      }
     }
   });
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+  } catch (e) {}
+  document.body.removeChild(ta);
+  if (done) done();
 }
 
 async function fetchCalls() {
@@ -146,10 +177,13 @@ async function fetchCalls() {
     metricFailedEl.textContent = data.metrics.failed;
     metricConversionEl.textContent = `${data.metrics.conversion_rate} booking conversion`;
 
+    const previousTopId = allCalls.length > 0 ? allCalls[0].id : null;
     allCalls = data.calls || [];
     renderCallsList();
 
-    // Keep active call or select first
+    // Keep the reviewer's current selection stable across auto-refresh:
+    // only auto-select when nothing is selected (or the selected call
+    // disappeared). Never yank the inspector away to a newer call.
     if (allCalls.length > 0) {
       if (!activeCallId || !allCalls.some((c) => c.id === activeCallId)) {
         selectCall(allCalls[0].id);
@@ -162,8 +196,15 @@ async function fetchCalls() {
     }
   } catch (err) {
     console.error('Failed to load calls:', err);
-    callsListEl.innerHTML = `<div class="empty-state">Unable to load calls. Ensure backend is running at ${API_BASE || 'localhost:5000'}.</div>`;
+    callsListEl.innerHTML = `<div class="empty-state">Unable to load calls. Ensure backend is running.</div>`;
   }
+}
+
+function getSourceClass(source) {
+  if (!source) return 'source-webhook';
+  if (source.includes('Sync')) return 'source-sync';
+  if (source.includes('Simulation')) return 'source-sim';
+  return 'source-webhook';
 }
 
 function renderCallsList() {
@@ -183,6 +224,7 @@ function renderCallsList() {
       const activeClass = call.id === activeCallId ? 'active' : '';
       const summaryText = call.summary || 'No summary recorded';
       const patientLabel = call.patient_name || call.caller_phone;
+      const src = call.transcript_source || 'Vogent Telephony Webhook';
 
       return `
         <div class="call-item ${activeClass}" onclick="selectCall(${call.id})">
@@ -192,6 +234,7 @@ function renderCallsList() {
           </div>
           <div class="call-item-meta">
             <span class="call-item-time">${formatDate(call.created_at)}</span>
+            <span class="source-tag">${escapeHtml(src)}</span>
             ${call.detected_body_part ? `<span>• ${call.detected_body_part}</span>` : ''}
             ${call.detected_issue_type ? `<span>(${call.detected_issue_type})</span>` : ''}
           </div>
@@ -218,6 +261,25 @@ function selectCall(callId) {
 
   detailStatusEl.className = `status-pill ${call.status}`;
   detailStatusEl.textContent = call.status;
+
+  const src = call.transcript_source || 'Vogent Telephony Webhook';
+  const srcClass = getSourceClass(src);
+  const srcHelp = src.includes('Webhook')
+    ? 'Outcome reported by the voice flow itself (authoritative)'
+    : src.includes('Sync')
+      ? 'Transcript synced from Vogent dial history; outcome inferred when the flow never reported one'
+      : 'Manually simulated call for protocol testing';
+  if (detailSourceBadgeEl) {
+    detailSourceBadgeEl.className = `source-badge ${srcClass}`;
+    detailSourceBadgeEl.textContent = src;
+    detailSourceBadgeEl.title = srcHelp;
+  }
+  if (transcriptSourceBadgeEl) {
+    transcriptSourceBadgeEl.className = `source-badge ${srcClass}`;
+    transcriptSourceBadgeEl.textContent = src;
+    transcriptSourceBadgeEl.title = srcHelp;
+  }
+
   detailSidEl.textContent = call.call_sid || `ID-${call.id}`;
   detailDateEl.textContent = call.formatted_date || formatDate(call.created_at);
   detailPatientNameEl.textContent = call.patient_name || 'Anonymous Caller';
@@ -243,18 +305,19 @@ function selectCall(callId) {
 }
 
 function renderTranscript(rawTranscript) {
-  if (!rawTranscript) {
-    transcriptStreamEl.innerHTML = '<div class="empty-state">No transcript available.</div>';
+  if (!rawTranscript || rawTranscript.trim().startsWith('{{')) {
+    transcriptStreamEl.innerHTML = '<div class="empty-state">No transcript recorded yet.</div>';
     return;
   }
 
   const lines = rawTranscript.split('\n').filter((l) => l.trim().length > 0);
   transcriptStreamEl.innerHTML = lines
     .map((line) => {
-      const isAgent = line.startsWith('Agent:');
-      const isCaller = line.startsWith('Caller:');
+      const trimmed = line.trim();
+      const isAgent = /^(Agent|AI|Assistant|\[AI\]|\[Agent\]):/i.test(trimmed);
+      const isCaller = /^(Caller|Human|User|Patient|\[HUMAN\]|\[Caller\]):/i.test(trimmed);
       const speaker = isAgent ? 'Agent' : isCaller ? 'Caller' : 'System';
-      const text = line.replace(/^(Agent:|Caller:)\s*/, '');
+      const text = trimmed.replace(/^(\[?(Agent|AI|Assistant|Caller|Human|User|Patient)\]?):\s*/i, '');
 
       return `
         <div class="chat-bubble ${speaker.toLowerCase()}">
@@ -269,7 +332,15 @@ function renderTranscript(rawTranscript) {
 function formatDate(isoStr) {
   if (!isoStr) return '';
   const d = new Date(isoStr);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  if (isNaN(d.getTime())) return isoStr;
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
 }
 
 function formatDuration(seconds) {

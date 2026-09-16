@@ -110,6 +110,25 @@ def normalize_body_part(val: str) -> Optional[str]:
             return canonical
     return None
 
+def speak_time(dt) -> str:
+    """TTS-safe time phrasing: "10 AM", "1 PM", "10:30 AM".
+
+    Voice synthesis reads "10:00 AM" as "one thousand A M". Dropping ":00"
+    and zero-padding is the difference between a natural confirmation and
+    a broken one on every booking call.
+    """
+    h12 = dt.hour % 12 or 12
+    meridiem = "PM" if dt.hour >= 12 else "AM"
+    if dt.minute:
+        return f"{h12}:{dt.minute:02d} {meridiem}"
+    return f"{h12} {meridiem}"
+
+
+def format_slot_option(slot) -> str:
+    """Spoken slot offer, e.g. "Wednesday at 10 AM"."""
+    return f"{slot.start_time.strftime('%A')} at {speak_time(slot.start_time)}"
+
+
 def normalize_issue_type(val: str) -> Optional[str]:
     if not val:
         return None
@@ -121,9 +140,123 @@ def normalize_issue_type(val: str) -> Optional[str]:
         return "Sports Medicine"
     if "fracture" in val_clean or "broken" in val_clean or "break" in val_clean:
         return "Fracture"
+    # Follow-up / routine visits are general consultations per the physician
+    # protocol spec (e.g. "Spine follow-up" -> General, so returning patients
+    # route to doctors like Patel/Reed/Mendez who accept Spine General).
+    if any(kw in val_clean for kw in (
+        "follow", "checkup", "check-up", "check up", "routine",
+        "post-op", "post op", "physical",
+    )):
+        return "General"
     if "general" in val_clean or "pain" in val_clean or "consult" in val_clean or "ache" in val_clean:
         return "General"
     return None
+
+
+# Location aliases callers actually say on the phone ("westside", "main
+# campus", ...) mapped to canonical codes. Used by route_patient and the
+# routing webhook so freeform preference answers resolve deterministically.
+LOCATION_ALIASES = {
+    "MAIN": "MAIN",
+    "MAIN CAMPUS": "MAIN",
+    "MAINCAMPUS": "MAIN",
+    "NORTH": "NORTH",
+    "NORTH CLINIC": "NORTH",
+    "NORTHCLINIC": "NORTH",
+    "WEST": "WEST",
+    "WESTSIDE": "WEST",
+    "WEST SIDE": "WEST",
+    "WESTSIDE OFFICE": "WEST",
+    "WEST SIDE OFFICE": "WEST",
+}
+
+NO_PREFERENCE_VALUES = {"", "null", "none", "no", "no.", "n/a", "na", "no preference", "no preference."}
+
+DOCTOR_LAST_NAMES = [
+    "chen", "walsh", "patel", "kim", "torres", "nguyen", "o'brien", "obrien",
+    "brooks", "sharma", "reed", "vasquez", "mendez",
+]
+
+
+def normalize_location_code(val: Optional[str]) -> Optional[str]:
+    """Map freeform location text to MAIN/NORTH/WEST, or None."""
+    if not val or not isinstance(val, str):
+        return None
+    key = val.strip().upper()
+    if key in LOCATION_ALIASES:
+        return LOCATION_ALIASES[key]
+    compact = "".join(ch for ch in key if ch.isalnum() or ch == " ")
+    compact = " ".join(compact.split())
+    if compact in LOCATION_ALIASES:
+        return LOCATION_ALIASES[compact]
+    nospace = compact.replace(" ", "")
+    return LOCATION_ALIASES.get(nospace)
+
+
+def is_informational_preference(val: Optional[str]) -> bool:
+    """True when a preference answer is really an informational question.
+
+    The voice flow funnels the whole freeform preferences reply ("Do you
+    have a preferred location or doctor?") into preferred_doctor, so a
+    caller asking "Which physicians do you have?" arrived as a doctor
+    NAME request, poisoned routing_match, and caused a blind transfer.
+    Informational asks must never be treated as a name/location choice —
+    the flow answers them via /api/providers/list instead.
+    """
+    if not val or not isinstance(val, str):
+        return False
+    lowered = val.strip().lower()
+    if "?" in val:
+        return True
+    asks = ("which", "what", "who", "list of", "tell me", "do you have", "any ")
+    names = ("doctor", "physician", "provider", "specialist", "clinic", "location", "office")
+    return any(a in lowered for a in asks) and any(n in lowered for n in names)
+
+
+def clean_preference_text(val: Optional[str]) -> Optional[str]:
+    """Return None for empty / placeholder / negative preference answers."""
+    if not val or not isinstance(val, str):
+        return None
+    if val.strip().startswith("{{"):
+        return None
+    if val.strip().lower() in NO_PREFERENCE_VALUES:
+        return None
+    if is_informational_preference(val):
+        return None
+    # Flow-internal multiple_choice labels from node_ask_preferences — never
+    # real doctor names or locations; matching must proceed unfiltered.
+    if val.strip().lower() in ("has_preference", "no_preference", "wants_physician_list"):
+        return None
+    return val.strip()
+
+
+def infer_preferences_from_text(db: Session, *texts: Optional[str]):
+    """Scan freeform caller text for location codes and doctor mentions.
+
+    The voice flow funnels whole freeform answers into single fields, so
+    "Main Campus", "Dr. Patel", or even "Spine follow-up with doctor Patel"
+    (arriving as the issue-type answer) must all resolve. Doctor last names
+    match on word boundaries only — substring matching would read the "reed"
+    in "I need" as Dr. Thomas Reed.
+    """
+    import re
+    combined = " ".join(t for t in texts if t and isinstance(t, str)).lower()
+    if not combined:
+        return None, None
+    flat = combined.replace("'", "").replace("-", " ")
+    location_code = None
+    for alias, code in LOCATION_ALIASES.items():
+        if alias.lower() in flat:
+            location_code = code
+            break
+    doctor_name = None
+    for last in DOCTOR_LAST_NAMES:
+        if re.search(r"\b" + re.escape(last.replace("'", "")) + r"\b", flat):
+            match = db.query(Doctor).filter(Doctor.name.ilike(f"%{last}%")).first()
+            if match:
+                doctor_name = match.name
+                break
+    return location_code, doctor_name
 
 class RoutingResult:
     def __init__(
@@ -175,6 +308,11 @@ def route_patient(
     """
     body_part = normalize_body_part(body_part_raw) or body_part_raw
     issue_type = normalize_issue_type(issue_type_raw) or issue_type_raw
+
+    # Normalize location code (accept "main", "MAIN", "Main Campus", "westside")
+    preferred_location_code = normalize_location_code(preferred_location_code)
+    if preferred_location_code not in VALID_LOCATIONS:
+        preferred_location_code = None
 
     if body_part not in VALID_BODY_PARTS:
         return RoutingResult(
@@ -232,11 +370,57 @@ def route_patient(
     ).all()
 
     if not matching_protocols:
+        # Same-body-part alternatives (different issue types) so the caller
+        # hears an appropriate alternative per the PDF ("explain that to
+        # the caller in plain language, and redirect them to an
+        # appropriate alternative") instead of a bare transfer. e.g.
+        # Spine + Sports Medicine (new patient) -> Dr. Carlos Mendez for
+        # Spine General. Mirrors /api/providers/list so the two can never
+        # disagree. New-patient-closed doctors are excluded for new
+        # callers; returning callers hear every option.
+        alt_protocols = db.query(DoctorProtocol).filter(
+            DoctorProtocol.body_part == body_part
+        ).all()
+        alt_seen: Dict[int, str] = {}
+        for p in alt_protocols:
+            if p.doctor_id in alt_seen:
+                continue
+            alt_seen[p.doctor_id] = p.accepted_type
+        alt_docs = []
+        for doc_id, accepted_type in alt_seen.items():
+            doc = db.query(Doctor).filter(Doctor.id == doc_id).first()
+            if not doc:
+                continue
+            if is_new_patient and not doc.accepts_new_patients:
+                continue
+            alt_docs.append((doc, accepted_type))
+        alt_docs.sort(key=lambda t: t[0].name)
+        if not alt_docs:
+            return RoutingResult(
+                success=False,
+                status_code="NO_MATCH",
+                message=f"No physician configured for {body_part} with issue type {issue_type}.",
+                agent_speech=f"I checked our directory, but none of our orthopedic physicians currently handle {issue_type.lower()} appointments for {body_part.lower()}. Let me connect you with a care coordinator who can assist you further.",
+            )
+        alt_speech = "; ".join(
+            f"{doc.name} for {acc.lower()} at "
+            f"{' and '.join(loc.name for loc in doc.locations)}"
+            for doc, acc in alt_docs
+        )
         return RoutingResult(
             success=False,
             status_code="NO_MATCH",
-            message=f"No physician configured for {body_part} with issue type {issue_type}.",
-            agent_speech=f"I checked our directory, but none of our orthopedic physicians currently handle {issue_type.lower()} appointments for {body_part.lower()}. Let me connect you with a care coordinator who can assist you further.",
+            message=(
+                f"No physician configured for {body_part} with issue type "
+                f"{issue_type}; alternatives offered."
+            ),
+            agent_speech=(
+                f"None of our physicians handle {issue_type.lower()} for "
+                f"{body_part.lower()}, but for {body_part.lower()} you can "
+                f"see: {alt_speech}. Let me connect you with our intake "
+                f"coordinator to get that scheduled."
+            ),
+            alternative_doctors=[doc for doc, _ in alt_docs],
         )
 
     eligible_doctor_ids = [p.doctor_id for p in matching_protocols]
@@ -316,32 +500,49 @@ def route_patient(
             message=f"Physician {selected_doc.name} matches, but no open appointment slots were found.",
             agent_speech=f"{selected_doc.name} specializes in {body_part} {issue_type}, but unfortunately has no open appointments in the schedule right now. Would you like me to add you to the cancellation waitlist?",
             matched_doctor=selected_doc,
-            alternative_docs=[d for d in eligible_docs if d.id != selected_doc.id],
+            alternative_doctors=[d for d in eligible_docs if d.id != selected_doc.id],
         )
 
     # 6. Generate human-like, natural agent speech tailored to the clinical context
     doc_locations_str = " and ".join([loc.name for loc in selected_doc.locations])
-    slot_options = [s.start_time.strftime("%A at %I:%M %p") for s in selected_slots[:2]]
-    slot_options_str = " or ".join(slot_options)
+    # Offer two DISTINCT times: multi-location doctors hold parallel slots
+    # (e.g. Torres MAIN+NORTH both at 9 AM), which previously produced
+    # "...9:00 AM or 9:00 AM". Same-time cross-location pairs keep a location
+    # qualifier so the options stay distinguishable.
+    distinct, overflow = [], []
+    _seen_times = set()
+    for s in selected_slots:
+        (distinct if s.start_time not in _seen_times else overflow).append(s)
+        _seen_times.add(s.start_time)
+    offered = (distinct + overflow)[:2]
+    qualify_location = len(offered) == 2 and offered[0].location_code != offered[1].location_code
+
+    def _offer_text(s):
+        text = format_slot_option(s)
+        if qualify_location:
+            text += f" at {s.location.name}"
+        return text
+
+    slot_options_str = " or ".join(_offer_text(s) for s in offered)
 
     if redirected_doctor_name:
         status_code = "REDIRECTED_SUCCESS"
         agent_speech = (
             f"Regarding {redirected_doctor_name}: {redirect_reason} "
             f"However, I can schedule you with {selected_doc.name}, who specializes in {body_part} {issue_type} at our {selected_slots[0].location.name}. "
-            f"The earliest openings are {slot_options_str}. Would either of those work for you?"
+            f"The earliest openings are {slot_options_str}."
         )
     elif fallback_occurred:
         status_code = "FALLBACK_SUCCESS"
         agent_speech = (
             f"{original_top_doc.name} has no immediate openings, but {selected_doc.name} also specializes in {body_part} {issue_type} at our {selected_slots[0].location.name}. "
-            f"I have openings on {slot_options_str}. Would you like one of those?"
+            f"I have openings on {slot_options_str}."
         )
     else:
         status_code = "MATCH_FOUND"
         agent_speech = (
             f"I have matched you with {selected_doc.name} for your {body_part} {issue_type.lower()} at our {selected_slots[0].location.name}. "
-            f"I have available times on {slot_options_str}. Would one of those work for you?"
+            f"I have available times on {slot_options_str}."
         )
 
     return RoutingResult(

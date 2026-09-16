@@ -17,3 +17,11 @@ def get_db():
 def init_db():
     import app.models  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    import sqlalchemy as sa
+    with engine.connect() as conn:
+        try:
+            conn.execute(sa.text("ALTER TABLE call_logs ADD COLUMN transcript_source VARCHAR(50);"))
+            conn.commit()
+        except Exception:
+            pass
+

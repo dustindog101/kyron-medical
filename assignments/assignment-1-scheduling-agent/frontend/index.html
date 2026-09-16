@@ -96,6 +96,7 @@
             <div>
               <div class="detail-meta">
                 <span class="status-pill" id="detail-status">SCHEDULED</span>
+                <span class="source-badge source-webhook" id="detail-source-badge">Vogent Telephony Webhook</span>
                 <span class="detail-sid" id="detail-sid">VOG-1001</span>
                 <span class="detail-date" id="detail-date">Today at 2:30 PM</span>
               </div>
@@ -130,7 +131,10 @@
           <!-- Transcript Viewer -->
           <div class="detail-section transcript-section">
             <div class="section-heading-row">
-              <h4 class="section-heading">Full Conversational Transcript</h4>
+              <div style="display: flex; align-items: center; gap: 0.6rem;">
+                <h4 class="section-heading" style="margin-bottom: 0;">Full Conversational Transcript</h4>
+                <span class="source-badge source-webhook" id="transcript-source-badge">Vogent Telephony Webhook</span>
+              </div>
               <button class="btn btn-sm" id="btn-copy-transcript">Copy Text</button>
             </div>
             <div class="transcript-stream" id="transcript-stream">
@@ -199,6 +203,16 @@
             <label>Requested Doctor (Optional - test redirections)</label>
             <input type="text" id="sim-requested-doctor" placeholder="e.g. Dr. Aisha Patel, Dr. Maria Chen" />
             <span class="help-text">Try requesting 'Dr. Aisha Patel' for a new patient to test the redirectional protocol!</span>
+          </div>
+
+          <div class="form-group">
+            <label>Preferred Location (Optional)</label>
+            <select id="sim-location">
+              <option value="">No preference</option>
+              <option value="MAIN">Main Campus</option>
+              <option value="NORTH">North Clinic</option>
+              <option value="WEST">Westside Office</option>
+            </select>
           </div>
 
           <div class="modal-footer">

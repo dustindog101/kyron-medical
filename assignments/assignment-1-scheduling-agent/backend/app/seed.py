@@ -244,62 +244,7 @@ def seed_database():
             db.add(prior_appt)
             db.commit()
 
-        print("Seeding sample call logs for review dashboard...")
-        c1 = CallLog(
-            call_sid="CA1001",
-            caller_phone="+14155550222",
-            patient_id=p2.id,
-            status="SCHEDULED",
-            detected_body_part="Knee",
-            detected_issue_type="Sports Medicine",
-            duration_seconds=142,
-            summary="New patient scheduled for right knee ACL sprain with Dr. Maria Chen.",
-            transcript="""Agent: Thank you for calling Kyron Medical Scheduling. Are you a new or returning patient?
-Caller: Hi, I'm a new patient. My name is David Miller.
-Agent: Welcome David. What symptoms or injury are you looking to be seen for today?
-Caller: I twisted my knee playing soccer over the weekend and it's swollen. I think it's a ligament or meniscus issue.
-Agent: I'm sorry to hear that. For a sports-related knee injury, Dr. Maria Chen at our Main Campus is an excellent specialist. Let me check her earliest availability.
-Agent: I have openings with Dr. Chen on Tuesday at 10:00 AM or 2:00 PM. Would either of those work for you?
-Caller: Tuesday at 10:00 AM sounds great.
-Agent: Perfect! I have booked you with Dr. Maria Chen at Main Campus for Tuesday at 10:00 AM for your knee sports medicine evaluation. You'll receive a confirmation text shortly. Have a wonderful day!""",
-        )
-
-        c2 = CallLog(
-            call_sid="CA1002",
-            caller_phone="+14155550999",
-            status="REDIRECTED",
-            detected_body_part="Spine",
-            detected_issue_type="Fracture",
-            duration_seconds=115,
-            summary="New caller requested Dr. Aisha Patel for spine fracture; redirected because Dr. Patel is closed to new patients and only treats general spine.",
-            transcript="""Agent: Thank you for calling Kyron Medical Scheduling. Are you a new or returning patient?
-Caller: I'm new, but my cousin recommended Dr. Aisha Patel.
-Agent: Got it. What reason are you calling in for today?
-Caller: I had a bad fall off a ladder and the urgent care doctor said I have a hairline spine fracture.
-Agent: Thank you for letting me know. Regarding Dr. Aisha Patel: Dr. Patel is currently only seeing established patients and only handles general spine consultations, not acute fractures. However, Dr. Sarah O'Brien at our Westside Office is our specialist for spine fractures.
-Caller: Oh okay, that makes sense. Is Dr. O'Brien taking new patients?
-Agent: Let me check our directory right now... Dr. O'Brien is also currently closed to first-time visits, so I'm connecting you directly to our urgent clinical triage nurse.
-Caller: Thank you for explaining that clearly.""",
-        )
-
-        c3 = CallLog(
-            call_sid="CA1003",
-            caller_phone="+14155550888",
-            status="ABANDONED",
-            detected_body_part="Hip",
-            detected_issue_type="General",
-            duration_seconds=42,
-            summary="Caller disconnected during insurance and intake inquiry.",
-            transcript="""Agent: Thank you for calling Kyron Medical Scheduling. Are you a new or returning patient?
-Caller: Hello, yes, I'm calling about my hip. It's been hurting for a few weeks.
-Agent: I can definitely help with that. Have you visited any of our locations before?
-Caller: Hang on a second, someone is knocking at my door... [Caller disconnected]""",
-        )
-
-        db.add_all([c1, c2, c3])
-        db.commit()
-
-        print("Database seeded successfully!")
+        print("Database initialized with physicians and clinical protocols (0 fake calls).")
     finally:
         db.close()
 

@@ -1,18 +1,19 @@
-version: '3.8'
-
 services:
   scheduling-agent:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: kyron-scheduling-agent
     restart: always
     ports:
       - "5000:5000"
-      - "80:5000"
     environment:
       - PORT=5000
-      - SECRET_KEY=kyron-production-secret-2026
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - DATABASE_PATH=/app/data/kyron_scheduling.db
+      - FRONTEND_DIR=/app/frontend
+      - FRONTEND_DRAFT_DIR=/app/frontend-draft/dist
+      - PRIMARY_FRONTEND=${PRIMARY_FRONTEND:-legacy}
       - FLASK_ENV=production
     volumes:
       - data-volume:/app/data
